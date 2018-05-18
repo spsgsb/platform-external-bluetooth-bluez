@@ -564,7 +564,6 @@ int main(int argc, char *argv[])
 	GDBusClient *client;
 	guint signal;
 
-	printf("ahahaahah\n");
 	signal = setup_signalfd();
 	if (signal == 0)
 		return -errno;

@@ -579,7 +579,7 @@ static void *check_wifi_status(void *user_data)
 					wifi_status = 1;
 					printf("wifi setup success, and then exit ble mode\n");
 					sleep(5);
-					system("sh /usr/bin/bluez_tool.sh restart &");
+					system("sh /usr/bin/bluez_tool.sh reset &");
 					exit(0);
 				} else {
 					wifi_status = 2;
