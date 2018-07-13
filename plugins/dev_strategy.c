@@ -29,9 +29,64 @@
 /********************************************************************/
 #define DEV_STRATEGY 2
 
+#define RESERVED_DEVICE_FILE "/etc/bluetooth/reserved_device"
 static GDBusClient *client = NULL;
 static GDBusProxy *adapter_proxy = NULL;
+static GDBusProxy *reserved_device_proxy = NULL;
+static const char *reserved_device_path = NULL;
 static GList *dev_list = NULL;
+static char SRT[2] = {5, 2};		//Startup reconnect timeout
+
+static gboolean connect_dev(void* user_data);
+static void connect_dev_return(DBusMessage *message, void *user_data);
+
+static void save_reserved_device()
+{
+	FILE *fp;
+	const char *obj_path;
+
+	if (!reserved_device_proxy) {
+		info("reserved_device_proxy is NULL");
+		return;
+	}
+
+	obj_path = g_dbus_proxy_get_path(reserved_device_proxy);
+
+	info("reserved device obj_path = %s\n", obj_path);
+
+	fp = fopen(RESERVED_DEVICE_FILE, "w");
+	if (fp  == NULL) {
+		error("open %s: %s", RESERVED_DEVICE_FILE, strerror(errno));
+		return;
+	}
+
+	fwrite(obj_path, strlen(obj_path), 1, fp);
+
+	fclose(fp);
+
+}
+
+static const char* get_reserved_device()
+{
+	FILE *fp;
+	static char obj_path[] = "/org/bluez/hci0/dev_xx_xx_xx_xx_xx_xx";
+
+
+	fp = fopen(RESERVED_DEVICE_FILE, "r");
+	if (fp  == NULL) {
+		error("open %s: %s", RESERVED_DEVICE_FILE, strerror(errno));
+		return obj_path;
+	}
+
+	fread(obj_path, sizeof(obj_path), 1, fp);
+
+	fclose(fp);
+
+	info("reserved device obj_path readed = %s\n", obj_path);
+
+	return obj_path;
+
+}
 
 static int set_discoverable(int enable)
 {
@@ -39,7 +94,7 @@ static int set_discoverable(int enable)
 	DBusMessageIter iter;
 
 	if (!adapter_proxy) {
-		error("set mode fail, org.bluez.Adaterp1 not registered yet!");
+		error("Enable/Disable disacoverable fail, org.bluez.Adapter1 not registered yet!");
 		return -1;
 	}
 
@@ -67,7 +122,7 @@ static int set_pairable(int enable)
 	DBusMessageIter iter;
 
 	if (!adapter_proxy) {
-		error("set mode fail, org.bluez.Adaterp1 not registered yet!");
+		error("Enable/Disable pairable fail, org.bluez.Adapter1 not registered yet!");
 		return -1;
 	}
 
@@ -87,6 +142,59 @@ static int set_pairable(int enable)
 									NULL,
 									NULL);
 	return 0;
+}
+
+static void connect_dev_return(DBusMessage *message, void *user_data)
+{
+
+	DBusError error;
+	static int cnt = 3;
+
+	dbus_error_init(&error);
+	if (dbus_set_error_from_message(&error, message) == TRUE) {
+		info("%s get msg: %s", __func__, error.name);
+
+		if (strstr(error.name, "Failed") && (cnt > 0)) {
+			info("%s reset timer", __func__);
+			cnt--;
+			g_timeout_add_seconds(SRT[1], connect_dev, user_data);
+
+		}
+		dbus_error_free(&error);
+	}
+}
+
+static gboolean connect_dev(void* user_data)
+{
+	GDBusProxy *proxy = (GDBusProxy *) user_data;
+	DBusMessageIter iter;
+
+	info("Startup reconnection begin!!");
+
+	if (!proxy) {
+		error("Connecet device  fail, invalid proxy!");
+		return FALSE;
+	}
+
+	if (g_list_length(dev_list) > 0) {
+		error("Device connected already, return!");
+		return FALSE;
+
+	}
+
+	info("Connect target device: %s", g_dbus_proxy_get_path(proxy));
+
+	if (g_dbus_proxy_method_call(proxy,
+								 "Connect",
+								 NULL,
+								 connect_dev_return,
+								 user_data,
+								 NULL) == FALSE) {
+		error("Failed to call org.bluez.Device1.Connect");
+	}
+
+	//not matter what, stop timer
+	return FALSE;
 }
 
 static int disconnect_prev_dev()
@@ -144,6 +252,11 @@ static int strategy_excute()
 
 	info("Connected device number = %d", dev_num);
 #if (DEV_STRATEGY == 1)
+	if (g_list_first(dev_list))
+		reserved_device_proxy = (GDBusProxy *)g_list_first(dev_list)->data;
+	else
+		reserved_device_proxy = NULL;
+
 	if (dev_num > 1)
 		disconnect_next_dev();
 
@@ -153,31 +266,21 @@ static int strategy_excute()
 		set_discoverable(1);
 
 #elif (DEV_STRATEGY == 2)
+	if (g_list_last(dev_list))
+		reserved_device_proxy = (GDBusProxy *)g_list_last(dev_list)->data;
+	else
+		reserved_device_proxy = NULL;
+
 	if (dev_num > 1)
 		disconnect_prev_dev();
 #endif
+
+	save_reserved_device();
 
 	return 0;
 
 }
 
-#if 0
-static void property_changed(GDBusProxy *proxy, const char *name,
-							 DBusMessageIter *iter, void *user_data)
-{
-	dbus_bool_t valbool;
-	if (!strcmp(name, "Connected")) {
-		dbus_message_iter_get_basic(iter, &valbool);
-		info("%s, Connectd status changed:  %s\n", g_dbus_proxy_get_path(proxy), valbool == TRUE ? "TRUE" : "FALSE");
-		if (TRUE == valbool) {
-			dev_list = g_list_append(dev_list, proxy);
-		} else {
-			dev_list = g_list_remove(dev_list, proxy);
-		}
-		strategy_excute();
-	}
-}
-#else
 static void property_changed(GDBusProxy *proxy, const char *name,
 							 DBusMessageIter *iter, void *user_data)
 {
@@ -199,29 +302,36 @@ static void property_changed(GDBusProxy *proxy, const char *name,
 		}
 	}
 }
-#endif
 
 static void proxy_added(GDBusProxy *proxy, void *user_data)
 {
 	const char *interface;
 	DBusMessageIter iter;
 	dbus_bool_t valbool;
+	static int startup = 1;
 
 	interface = g_dbus_proxy_get_interface(proxy);
 
 	if (!strcmp(interface, "org.bluez.Device1")) {
-		info("org.bluez.Device1 registered: %s\n", g_dbus_proxy_get_path(proxy));
-		/*New connected device won't report property changed, we need get property here!*/
+		const char *obj_path =  g_dbus_proxy_get_path(proxy);
+		info("org.bluez.Device1 registered: %s\n", obj_path);
 		if (TRUE == g_dbus_proxy_get_property(proxy, "Connected", &iter)) {
 			dbus_message_iter_get_basic(&iter, &valbool);
 			if (TRUE == valbool) {
 				dev_list = g_list_append(dev_list, proxy);
 				strategy_excute();
+			} else {
+				/*If device is found in startup and is reserved_device
+				  we will reconnect it*/
+				if (!strcmp(obj_path, reserved_device_path) && startup) {
+					info("Going to reconnect last connected device!");
+					startup = 0;
+					//create a timer call connect_dev later
+					g_timeout_add_seconds(SRT[0], connect_dev, (void *)proxy);
+				}
 			}
 		}
 
-		/*watch properties changes of org.bulez.Device1*/
-		//g_dbus_proxy_set_property_watch(proxy, property_changed, NULL);
 	}
 
 	if (!strcmp(interface, "org.bluez.Adapter1"))
@@ -235,13 +345,8 @@ static void proxy_removed(GDBusProxy *proxy, void *user_data)
 	DBusMessageIter iter;
 
 	interface = g_dbus_proxy_get_interface(proxy);
-
 	if (!strcmp(interface, "org.bluez.Device1")) {
 		info("org.bluez.Device1 removed: %s\n", g_dbus_proxy_get_path(proxy));
-		if (TRUE == g_dbus_proxy_get_property(proxy, "Connected", &iter)) {
-			dev_list = g_list_remove(dev_list, proxy);
-			strategy_excute();
-		}
 	}
 
 	if (!strcmp(interface, "org.bluez.Adapter1"))
@@ -251,7 +356,6 @@ static void proxy_removed(GDBusProxy *proxy, void *user_data)
 static int dev_strategy_probe(struct btd_adapter *adapter)
 {
 	DBG("");
-	//g_dbus_client_set_proxy_handlers(client, proxy_added, proxy_removed, NULL, NULL);
 	g_dbus_client_set_proxy_handlers(client, proxy_added, proxy_removed, property_changed, NULL);
 
 	return 0;
@@ -284,6 +388,9 @@ static int dev_strategy_init(void)
 		g_dbus_client_unref(client);
 		error("Failed to register btd driver\n");
 	}
+
+	reserved_device_path = get_reserved_device();
+
 #else
 	info("dev_strategy won't work!!");
 #endif
