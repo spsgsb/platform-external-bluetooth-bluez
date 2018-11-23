@@ -263,6 +263,12 @@ static int ath3k_pm(int fd, struct uart_t *u, struct termios *ti)
 	return ath3k_post(fd, u->pm);
 }
 
+static int qca(int fd, struct uart_t *u, struct termios *ti)
+{
+	fprintf(stderr,"qca\n");
+	return qca_soc_init(fd, u->bdaddr);
+}
+
 static int qualcomm(int fd, struct uart_t *u, struct termios *ti)
 {
 	return qualcomm_init(fd, u->speed, ti, u->bdaddr);
@@ -1092,6 +1098,10 @@ struct uart_t uart[] = {
 
 	{ "ath3k",    0x0000, 0x0000, HCI_UART_ATH3K, 115200, 115200,
 			FLOW_CTL, DISABLE_PM, NULL, ath3k_ps, ath3k_pm  },
+
+	/* QCA ROME */
+	{ "qca",    0x0000, 0x0000, HCI_UART_H4, 115200, 2000000,
+			FLOW_CTL, DISABLE_PM, NULL, qca, NULL },
 
 	/* QUALCOMM BTS */
 	{ "qualcomm",   0x0000, 0x0000, HCI_UART_H4,   115200, 115200,
