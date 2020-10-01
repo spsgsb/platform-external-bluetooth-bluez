@@ -67,9 +67,10 @@ monitor_btmon_LDADD = lib/libbluetooth-internal.la \
 endif
 
 if TESTING
+bin_PROGRAMS += tools/gap-tester
 noinst_PROGRAMS += emulator/btvirt emulator/b1ee emulator/hfp \
 					peripheral/btsensor tools/3dsp \
-					tools/mgmt-tester tools/gap-tester \
+					tools/mgmt-tester \
 					tools/l2cap-tester tools/sco-tester \
 					tools/smp-tester tools/hci-tester \
 					tools/rfcomm-tester tools/bnep-tester \
@@ -380,7 +381,8 @@ EXTRA_DIST += tools/hid2hci.1
 endif
 
 if READLINE
-noinst_PROGRAMS += tools/btmgmt tools/obex-client-tool tools/obex-server-tool \
+bin_PROGRAMS += tools/btmgmt
+noinst_PROGRAMS += tools/obex-client-tool tools/obex-server-tool \
 			tools/bluetooth-player tools/obexctl
 
 tools_obex_client_tool_SOURCES = $(gobex_sources) $(btio_sources) \
