@@ -20,7 +20,6 @@
 #include <config.h>
 #endif
 
-#include <ctype.h>
 #include <stdio.h>
 #include <stdbool.h>
 #include <stdint.h>
@@ -29,25 +28,16 @@
 #include <getopt.h>
 #include <unistd.h>
 #include <errno.h>
-#include <fcntl.h>
-#include <sys/ioctl.h>
-#include <pthread.h>
-#include <sys/socket.h>
-#include <sys/un.h>
-
 
 #include "lib/bluetooth.h"
 #include "lib/hci.h"
 #include "lib/hci_lib.h"
 #include "lib/l2cap.h"
 #include "lib/uuid.h"
-#include "monitor/bt.h"
-
 
 #include "src/shared/mainloop.h"
 #include "src/shared/util.h"
 #include "src/shared/att.h"
-#include "src/shared/hci.h"
 #include "src/shared/queue.h"
 #include "src/shared/timeout.h"
 #include "src/shared/gatt-db.h"
@@ -55,30 +45,22 @@
 
 #define UUID_GAP			0x1800
 #define UUID_GATT			0x1801
-
-
-#ifdef DUEROS
-#define UUID_DEVICE_INFO 0x1111
-#define UUID_USER_CHAR   0x2222
-#else
-#define UUID_DEVICE_INFO 0x180A
-#define UUID_USER_CHAR   0x9999
-#endif
-
-static struct hci_dev_info hdi;
-static int ctl;
-static pthread_t thread_id;
-static int wifi_configured = 0;
-static struct server *server;
+#define UUID_HEART_RATE			0x180d
+#define UUID_HEART_RATE_MSRMT		0x2a37
+#define UUID_HEART_RATE_BODY		0x2a38
+#define UUID_HEART_RATE_CTRL		0x2a39
 
 #define ATT_CID 4
 
 #define PRLOG(...) \
 	do { \
-		printf("BLUEZ-GATT: "__VA_ARGS__); \
+		printf(__VA_ARGS__); \
+		print_prompt(); \
 	} while (0)
 
-
+#ifndef MIN
+#define MIN(a, b) ((a) < (b) ? (a) : (b))
+#endif
 
 #define COLOR_OFF	"\x1B[0m"
 #define COLOR_RED	"\x1B[0;91m"
@@ -89,7 +71,8 @@ static struct server *server;
 #define COLOR_BOLDGRAY	"\x1B[1;30m"
 #define COLOR_BOLDWHITE	"\x1B[1;37m"
 
-
+static const char test_device_name[] = "Very Long Test Device Name For Testing "
+				"ATT Protocol Operations On GATT Server";
 static bool verbose = false;
 
 struct server {
@@ -97,173 +80,31 @@ struct server {
 	struct bt_att *att;
 	struct gatt_db *db;
 	struct bt_gatt_server *gatt;
+
 	uint8_t *device_name;
 	size_t name_len;
+
 	uint16_t gatt_svc_chngd_handle;
 	bool svc_chngd_enabled;
-	struct gatt_db_attribute *chara_att;
-	uint16_t chara_handle;
+
+	uint16_t hr_handle;
+	uint16_t hr_msrmt_handle;
+	uint16_t hr_energy_expended;
+	bool hr_visible;
+	bool hr_msrmt_enabled;
+	int hr_ee_count;
+	unsigned int hr_timeout_id;
 };
-
-typedef struct {
-	int server_sockfd;
-	int client_sockfd[10];
-	int client_num;
-	int server_len;
-	int client_len;
-	struct sockaddr_un server_address;
-	struct sockaddr_un client_address;
-	char sock_path[64];
-} tAPP_SOCKET;
-tAPP_SOCKET sk_handle;
-char socket_path[] = "/data/etc/rtk/config/aml_rtkble_socket";
-int rtk_ble_sk = 0;
-char socket_rev[256] = {0};
-int rtk_socket_rev_len = 1;
-
-
-
-
-/*******************config wifi zone************************************************/
-char start[1] = {0x01};
-char magic[10] = "amlogicble";
-char cmd[9] = "wifisetup";
-char ssid[32] = {0};
-char psk[32] = {0};
-char end[1] = {0x04};
-#define FRAME_BUF_MAX (1+10+9+32+32+1)
-char version[8] = "20171211";
-char frame_buf[FRAME_BUF_MAX] = {0};
-char ssid_psk_file[] = "/var/www/cgi-bin/wifi/select.txt";
-/*0: wifi set success, 1: wifi set fail*/
-char wifi_status_file[] = "/etc/bsa/config/wifi_status";
-char wifi_status = 0;
-char wifi_success = '1';
-void ble_init(void);
-
-int config_wifi(const uint8_t *arg, int len)
-{
-	int ret = 0;
-	int check_0 = 0;
-	FILE *fd;
-
-
-	if (len > 0) {
-		memset(frame_buf, 0, FRAME_BUF_MAX);
-		memcpy(frame_buf, arg, len);
-		PRLOG("frame_buf:%s, len:%d\n", frame_buf, len);
-		check_0 = 0;
-		if ((frame_buf[0] == 0x01)
-				&& (frame_buf[FRAME_BUF_MAX - 1] == 0X04)) {
-			PRLOG("frame start and end is right\n");
-			if (!strncmp(magic, frame_buf + 1, 10)) {
-				PRLOG("magic : %s\n", magic);
-				PRLOG("version : %s\n", version);
-				check_0 = 1;
-			} else {
-				PRLOG("magic of frame error!!!\n");
-				memset(frame_buf, 0, FRAME_BUF_MAX);
-				check_0 = 0;
-			}
-		} else {
-			PRLOG("start or end of frame error!!!\n");
-			memset(frame_buf, 0, FRAME_BUF_MAX);
-			check_0 = 0;
-		}
-		if (check_0 == 1) {
-			if (!strncmp("wifisetup", frame_buf + 11, 9)) {
-				strncpy(ssid, frame_buf + 20, 32);
-				strncpy(psk, frame_buf + 52, 32);
-				PRLOG("WiFi setup,ssid:%s,psk:%s\n", ssid, psk);
-				system("rm -rf /var/www/cgi-bin/wifi/select.txt");
-				system("touch /var/www/cgi-bin/wifi/select.txt");
-				system("chmod 644 /var/www/cgi-bin/wifi/select.txt");
-				fd = fopen(ssid_psk_file, "wb");
-				ret = fwrite(ssid, strlen(ssid), 1, fd);
-				if (ret != strlen(ssid)) {
-					PRLOG("write wifi ssid error\n");
-				}
-				ret = fwrite("\n", 1, 1, fd);
-				if (ret != 1) {
-					PRLOG("write enter and feedline error\n");
-				}
-				ret = fwrite(psk, strlen(psk), 1, fd);
-				if (ret != strlen(psk)) {
-					PRLOG("write wifi password error\n");
-				}
-				fflush(fd);
-				check_0 = 0;
-				memset(frame_buf, 0, FRAME_BUF_MAX);
-				fclose(fd);
-				wifi_configured = 1;
-
-			}
-		}
-	}
-	return 0;
-}
-
-/*******************config wifi zone end*********************************************/
-
-/*********************************socket ***************************************************/
-int setup_socket_server(tAPP_SOCKET *app_socket)
-{
-	unlink (app_socket->sock_path);
-	if ((app_socket->server_sockfd = socket (AF_UNIX, SOCK_STREAM, 0)) < 0) {
-		PRLOG("fail to create socket\n");
-		perror("socket");
-		return -1;
-	}
-	app_socket->server_address.sun_family = AF_UNIX;
-	strcpy (app_socket->server_address.sun_path, app_socket->sock_path);
-	memset(app_socket->client_sockfd, 0, sizeof(app_socket->client_sockfd));
-	app_socket->client_num = 0;
-	app_socket->server_len = sizeof (app_socket->server_address);
-	app_socket->client_len = sizeof (app_socket->client_address);
-	if ((bind (app_socket->server_sockfd, (struct sockaddr *)&app_socket->server_address, app_socket->server_len)) < 0) {
-		perror("bind");
-		return -1;
-
-	}
-	if (listen (app_socket->server_sockfd, 10) < 0) {
-		perror("listen");
-		return -1;
-	}
-	PRLOG ("Socket is ready for client connect...\n");
-
-	return 0;
-}
-
-int accpet_client(tAPP_SOCKET *app_socket)
-{
-	int sk = 0;
-
-	sk = accept (app_socket->server_sockfd, (struct sockaddr *)&app_socket->server_address, (socklen_t *)&app_socket->client_len);
-	if (sk == -1) {
-		perror ("accept");
-		return -1;
-	}
-	app_socket->client_sockfd[app_socket->client_num] = sk;
-	app_socket->client_num++;
-
-	return sk;
-}
-
-/*********************************end socket **********************************************/
-
-static struct bt_hci *hci_dev;
 
 static void print_prompt(void)
 {
-	PRLOG(COLOR_BLUE "[GATT server]" COLOR_OFF "# ");
+	printf(COLOR_BLUE "[GATT server]" COLOR_OFF "# ");
 	fflush(stdout);
 }
 
-
-
 static void att_disconnect_cb(int err, void *user_data)
 {
-	PRLOG("Device disconnected: %s\n", strerror(err));
+	printf("Device disconnected: %s\n", strerror(err));
 
 	mainloop_quit();
 }
@@ -273,7 +114,7 @@ static void att_debug_cb(const char *str, void *user_data)
 	const char *prefix = user_data;
 
 	PRLOG(COLOR_BOLDGRAY "%s" COLOR_BOLDWHITE "%s\n" COLOR_OFF, prefix,
-		  str);
+									str);
 }
 
 static void gatt_debug_cb(const char *str, void *user_data)
@@ -284,9 +125,9 @@ static void gatt_debug_cb(const char *str, void *user_data)
 }
 
 static void gap_device_name_read_cb(struct gatt_db_attribute *attrib,
-									unsigned int id, uint16_t offset,
-									uint8_t opcode, struct bt_att *att,
-									void *user_data)
+					unsigned int id, uint16_t offset,
+					uint8_t opcode, struct bt_att *att,
+					void *user_data)
 {
 	struct server *server = user_data;
 	uint8_t error = 0;
@@ -310,10 +151,10 @@ done:
 }
 
 static void gap_device_name_write_cb(struct gatt_db_attribute *attrib,
-									 unsigned int id, uint16_t offset,
-									 const uint8_t *value, size_t len,
-									 uint8_t opcode, struct bt_att *att,
-									 void *user_data)
+					unsigned int id, uint16_t offset,
+					const uint8_t *value, size_t len,
+					uint8_t opcode, struct bt_att *att,
+					void *user_data)
 {
 	struct server *server = user_data;
 	uint8_t error = 0;
@@ -355,9 +196,9 @@ done:
 }
 
 static void gap_device_name_ext_prop_read_cb(struct gatt_db_attribute *attrib,
-		unsigned int id, uint16_t offset,
-		uint8_t opcode, struct bt_att *att,
-		void *user_data)
+					unsigned int id, uint16_t offset,
+					uint8_t opcode, struct bt_att *att,
+					void *user_data)
 {
 	uint8_t value[2];
 
@@ -370,9 +211,9 @@ static void gap_device_name_ext_prop_read_cb(struct gatt_db_attribute *attrib,
 }
 
 static void gatt_service_changed_cb(struct gatt_db_attribute *attrib,
-									unsigned int id, uint16_t offset,
-									uint8_t opcode, struct bt_att *att,
-									void *user_data)
+					unsigned int id, uint16_t offset,
+					uint8_t opcode, struct bt_att *att,
+					void *user_data)
 {
 	PRLOG("Service Changed Read called\n");
 
@@ -380,9 +221,9 @@ static void gatt_service_changed_cb(struct gatt_db_attribute *attrib,
 }
 
 static void gatt_svc_chngd_ccc_read_cb(struct gatt_db_attribute *attrib,
-									   unsigned int id, uint16_t offset,
-									   uint8_t opcode, struct bt_att *att,
-									   void *user_data)
+					unsigned int id, uint16_t offset,
+					uint8_t opcode, struct bt_att *att,
+					void *user_data)
 {
 	struct server *server = user_data;
 	uint8_t value[2];
@@ -396,10 +237,10 @@ static void gatt_svc_chngd_ccc_read_cb(struct gatt_db_attribute *attrib,
 }
 
 static void gatt_svc_chngd_ccc_write_cb(struct gatt_db_attribute *attrib,
-										unsigned int id, uint16_t offset,
-										const uint8_t *value, size_t len,
-										uint8_t opcode, struct bt_att *att,
-										void *user_data)
+					unsigned int id, uint16_t offset,
+					const uint8_t *value, size_t len,
+					uint8_t opcode, struct bt_att *att,
+					void *user_data)
 {
 	struct server *server = user_data;
 	uint8_t ecode = 0;
@@ -424,48 +265,135 @@ static void gatt_svc_chngd_ccc_write_cb(struct gatt_db_attribute *attrib,
 		ecode = 0x80;
 
 	PRLOG("Service Changed Enabled: %s\n",
-		  server->svc_chngd_enabled ? "true" : "false");
+				server->svc_chngd_enabled ? "true" : "false");
 
 done:
 	gatt_db_attribute_write_result(attrib, id, ecode);
 }
-static void user_service_read_cb(struct gatt_db_attribute *attrib,
-								 unsigned int id, uint16_t offset,
-								 uint8_t opcode, struct bt_att *att,
-								 void *user_data)
+
+static void hr_msrmt_ccc_read_cb(struct gatt_db_attribute *attrib,
+					unsigned int id, uint16_t offset,
+					uint8_t opcode, struct bt_att *att,
+					void *user_data)
 {
+	struct server *server = user_data;
+	uint8_t value[2];
 
-	//	PRLOG("user_service_read_cb\n");
+	value[0] = server->hr_msrmt_enabled ? 0x01 : 0x00;
+	value[1] = 0x00;
 
-	gatt_db_attribute_read_result(attrib, id, 0, &wifi_status, 1);
+	gatt_db_attribute_read_result(attrib, id, 0, value, 2);
 }
 
-static void user_service_write_cb(struct gatt_db_attribute *attrib,
-								  unsigned int id, uint16_t offset,
-								  const uint8_t *value, size_t len,
-								  uint8_t opcode, struct bt_att *att,
-								  void *user_data)
+static bool hr_msrmt_cb(void *user_data)
 {
-	int i;
-	struct server *server = (struct server *)user_data;
-	PRLOG("%s enter, data len =%d\n", __func__, len);
+	struct server *server = user_data;
+	bool expended_present = !(server->hr_ee_count % 10);
+	uint16_t len = 2;
+	uint8_t pdu[4];
+	uint32_t cur_ee;
 
-#ifdef DUEROS
-	//Ble socket send
-	PRLOG ("msg to duerOS: %s\t length： %d\n", value, len);
+	pdu[0] = 0x06;
+	pdu[1] = 90 + (rand() % 40);
 
-	send(rtk_ble_sk, value, len, 0);
+	if (expended_present) {
+		pdu[0] |= 0x08;
+		put_le16(server->hr_energy_expended, pdu + 2);
+		len += 2;
+	}
 
-#else
-	config_wifi(value, len);
-#endif
+	bt_gatt_server_send_notification(server->gatt,
+						server->hr_msrmt_handle,
+						pdu, len);
 
-	gatt_db_attribute_write_result(attrib, id, 0);
 
+	cur_ee = server->hr_energy_expended;
+	server->hr_energy_expended = MIN(UINT16_MAX, cur_ee + 10);
+	server->hr_ee_count++;
+
+	return true;
+}
+
+static void update_hr_msrmt_simulation(struct server *server)
+{
+	if (!server->hr_msrmt_enabled || !server->hr_visible) {
+		timeout_remove(server->hr_timeout_id);
+		return;
+	}
+
+	server->hr_timeout_id = timeout_add(1000, hr_msrmt_cb, server, NULL);
+}
+
+static void hr_msrmt_ccc_write_cb(struct gatt_db_attribute *attrib,
+					unsigned int id, uint16_t offset,
+					const uint8_t *value, size_t len,
+					uint8_t opcode, struct bt_att *att,
+					void *user_data)
+{
+	struct server *server = user_data;
+	uint8_t ecode = 0;
+
+	if (!value || len != 2) {
+		ecode = BT_ATT_ERROR_INVALID_ATTRIBUTE_VALUE_LEN;
+		goto done;
+	}
+
+	if (offset) {
+		ecode = BT_ATT_ERROR_INVALID_OFFSET;
+		goto done;
+	}
+
+	if (value[0] == 0x00)
+		server->hr_msrmt_enabled = false;
+	else if (value[0] == 0x01) {
+		if (server->hr_msrmt_enabled) {
+			PRLOG("HR Measurement Already Enabled\n");
+			goto done;
+		}
+
+		server->hr_msrmt_enabled = true;
+	} else
+		ecode = 0x80;
+
+	PRLOG("HR: Measurement Enabled: %s\n",
+				server->hr_msrmt_enabled ? "true" : "false");
+
+	update_hr_msrmt_simulation(server);
+
+done:
+	gatt_db_attribute_write_result(attrib, id, ecode);
+}
+
+static void hr_control_point_write_cb(struct gatt_db_attribute *attrib,
+					unsigned int id, uint16_t offset,
+					const uint8_t *value, size_t len,
+					uint8_t opcode, struct bt_att *att,
+					void *user_data)
+{
+	struct server *server = user_data;
+	uint8_t ecode = 0;
+
+	if (!value || len != 1) {
+		ecode = BT_ATT_ERROR_INVALID_ATTRIBUTE_VALUE_LEN;
+		goto done;
+	}
+
+	if (offset) {
+		ecode = BT_ATT_ERROR_INVALID_OFFSET;
+		goto done;
+	}
+
+	if (value[0] == 1) {
+		PRLOG("HR: Energy Expended value reset\n");
+		server->hr_energy_expended = 0;
+	}
+
+done:
+	gatt_db_attribute_write_result(attrib, id, ecode);
 }
 
 static void confirm_write(struct gatt_db_attribute *attr, int err,
-						  void *user_data)
+							void *user_data)
 {
 	if (!err)
 		return;
@@ -473,33 +401,6 @@ static void confirm_write(struct gatt_db_attribute *attr, int err,
 	fprintf(stderr, "Error caching attribute %p - err: %d\n", attr, err);
 	exit(1);
 }
-
-
-static void user_service_descrip_read_cb(struct gatt_db_attribute *attrib,
-		unsigned int id, uint16_t offset,
-		uint8_t opcode, struct bt_att *att,
-		void *user_data)
-{
-	uint8_t value[2];
-	value[0] = 0x01;
-	value[1] = 0x00;
-	gatt_db_attribute_read_result(attrib, id, 0, value, 2);
-}
-
-static void user_service_descrip_write_cb(struct gatt_db_attribute *attrib,
-		unsigned int id, uint16_t offset,
-		const uint8_t *value, size_t len,
-		uint8_t opcode, struct bt_att *att,
-		void *user_data)
-{
-	int i;
-	PRLOG("%s enter, data =%s\t len =%d\n", __func__, value, len);
-	for (i = 0; i < len; i++)
-		PRLOG ("Write 0x2902 : %d\t%x\n", value[i], value[i]);
-	gatt_db_attribute_write_result(attrib, id, 0);
-}
-
-
 
 static void populate_gap_service(struct server *server)
 {
@@ -517,17 +418,17 @@ static void populate_gap_service(struct server *server)
 	 */
 	bt_uuid16_create(&uuid, GATT_CHARAC_DEVICE_NAME);
 	gatt_db_service_add_characteristic(service, &uuid,
-									   BT_ATT_PERM_READ | BT_ATT_PERM_WRITE,
-									   BT_GATT_CHRC_PROP_READ |
-									   BT_GATT_CHRC_PROP_EXT_PROP,
-									   gap_device_name_read_cb,
-									   gap_device_name_write_cb,
-									   server);
+					BT_ATT_PERM_READ | BT_ATT_PERM_WRITE,
+					BT_GATT_CHRC_PROP_READ |
+					BT_GATT_CHRC_PROP_EXT_PROP,
+					gap_device_name_read_cb,
+					gap_device_name_write_cb,
+					server);
 
 	bt_uuid16_create(&uuid, GATT_CHARAC_EXT_PROPER_UUID);
 	gatt_db_service_add_descriptor(service, &uuid, BT_ATT_PERM_READ,
-								   gap_device_name_ext_prop_read_cb,
-								   NULL, server);
+					gap_device_name_ext_prop_read_cb,
+					NULL, server);
 
 	/*
 	 * Appearance characteristic. Reads and writes should obtain the value
@@ -535,9 +436,9 @@ static void populate_gap_service(struct server *server)
 	 */
 	bt_uuid16_create(&uuid, GATT_CHARAC_APPEARANCE);
 	tmp = gatt_db_service_add_characteristic(service, &uuid,
-			BT_ATT_PERM_READ,
-			BT_GATT_CHRC_PROP_READ,
-			NULL, NULL, server);
+							BT_ATT_PERM_READ,
+							BT_GATT_CHRC_PROP_READ,
+							NULL, NULL, server);
 
 	/*
 	 * Write the appearance value to the database, since we're not using a
@@ -564,54 +465,83 @@ static void populate_gatt_service(struct server *server)
 
 	bt_uuid16_create(&uuid, GATT_CHARAC_SERVICE_CHANGED);
 	svc_chngd = gatt_db_service_add_characteristic(service, &uuid,
-				BT_ATT_PERM_READ,
-				BT_GATT_CHRC_PROP_READ | BT_GATT_CHRC_PROP_INDICATE,
-				gatt_service_changed_cb,
-				NULL, server);
+			BT_ATT_PERM_READ,
+			BT_GATT_CHRC_PROP_READ | BT_GATT_CHRC_PROP_INDICATE,
+			gatt_service_changed_cb,
+			NULL, server);
 	server->gatt_svc_chngd_handle = gatt_db_attribute_get_handle(svc_chngd);
 
 	bt_uuid16_create(&uuid, GATT_CLIENT_CHARAC_CFG_UUID);
 	gatt_db_service_add_descriptor(service, &uuid,
-								   BT_ATT_PERM_READ | BT_ATT_PERM_WRITE,
-								   gatt_svc_chngd_ccc_read_cb,
-								   gatt_svc_chngd_ccc_write_cb, server);
+				BT_ATT_PERM_READ | BT_ATT_PERM_WRITE,
+				gatt_svc_chngd_ccc_read_cb,
+				gatt_svc_chngd_ccc_write_cb, server);
 
 	gatt_db_service_set_active(service, true);
 }
 
-static void populate_user_service(struct server *server)
+static void populate_hr_service(struct server *server)
 {
 	bt_uuid_t uuid;
-	struct gatt_db_attribute *service, *characteristic;
+	struct gatt_db_attribute *service, *hr_msrmt, *body;
+	uint8_t body_loc = 1;  /* "Chest" */
 
-	bt_uuid16_create(&uuid, UUID_DEVICE_INFO);
+	/* Add Heart Rate Service */
+	bt_uuid16_create(&uuid, UUID_HEART_RATE);
 	service = gatt_db_add_service(server->db, &uuid, true, 8);
+	server->hr_handle = gatt_db_attribute_get_handle(service);
 
-
-	bt_uuid16_create(&uuid, UUID_USER_CHAR);
-	server->chara_att = gatt_db_service_add_characteristic(service, &uuid,
-						BT_ATT_PERM_READ | BT_ATT_PERM_WRITE,
-						BT_GATT_CHRC_PROP_NOTIFY | BT_GATT_CHRC_PROP_WRITE | BT_GATT_CHRC_PROP_INDICATE | BT_GATT_CHRC_PROP_READ,
-						user_service_read_cb,
-						user_service_write_cb,
-						server);
-	server->chara_handle = gatt_db_attribute_get_handle(server->chara_att);
+	/* HR Measurement Characteristic */
+	bt_uuid16_create(&uuid, UUID_HEART_RATE_MSRMT);
+	hr_msrmt = gatt_db_service_add_characteristic(service, &uuid,
+						BT_ATT_PERM_NONE,
+						BT_GATT_CHRC_PROP_NOTIFY,
+						NULL, NULL, NULL);
+	server->hr_msrmt_handle = gatt_db_attribute_get_handle(hr_msrmt);
 
 	bt_uuid16_create(&uuid, GATT_CLIENT_CHARAC_CFG_UUID);
 	gatt_db_service_add_descriptor(service, &uuid,
-								   BT_ATT_PERM_READ | BT_ATT_PERM_WRITE,
-								   user_service_descrip_read_cb,
-								   user_service_descrip_write_cb,
-								   server);
+					BT_ATT_PERM_READ | BT_ATT_PERM_WRITE,
+					hr_msrmt_ccc_read_cb,
+					hr_msrmt_ccc_write_cb, server);
 
-	gatt_db_service_set_active(service, true);
+	/*
+	 * Body Sensor Location Characteristic. Make reads obtain the value from
+	 * the database.
+	 */
+	bt_uuid16_create(&uuid, UUID_HEART_RATE_BODY);
+	body = gatt_db_service_add_characteristic(service, &uuid,
+						BT_ATT_PERM_READ,
+						BT_GATT_CHRC_PROP_READ,
+						NULL, NULL, server);
+	gatt_db_attribute_write(body, 0, (void *) &body_loc, sizeof(body_loc),
+							BT_ATT_OP_WRITE_REQ,
+							NULL, confirm_write,
+							NULL);
+
+	/* HR Control Point Characteristic */
+	bt_uuid16_create(&uuid, UUID_HEART_RATE_CTRL);
+	gatt_db_service_add_characteristic(service, &uuid,
+						BT_ATT_PERM_WRITE,
+						BT_GATT_CHRC_PROP_WRITE,
+						NULL, hr_control_point_write_cb,
+						server);
+
+	if (server->hr_visible)
+		gatt_db_service_set_active(service, true);
 }
 
+static void populate_db(struct server *server)
+{
+	populate_gap_service(server);
+	populate_gatt_service(server);
+	populate_hr_service(server);
+}
 
-
-static struct server *server_create(int fd)
+static struct server *server_create(int fd, uint16_t mtu, bool hr_visible)
 {
 	struct server *server;
+	size_t name_len = strlen(test_device_name);
 
 	server = new0(struct server, 1);
 	if (!server) {
@@ -636,6 +566,15 @@ static struct server *server_create(int fd)
 		goto fail;
 	}
 
+	server->name_len = name_len + 1;
+	server->device_name = malloc(name_len + 1);
+	if (!server->device_name) {
+		fprintf(stderr, "Failed to allocate memory for device name\n");
+		goto fail;
+	}
+
+	memcpy(server->device_name, test_device_name, name_len);
+	server->device_name[name_len] = '\0';
 
 	server->fd = fd;
 	server->db = gatt_db_new();
@@ -644,30 +583,31 @@ static struct server *server_create(int fd)
 		goto fail;
 	}
 
-	server->gatt = bt_gatt_server_new(server->db, server->att, 0);
+	server->gatt = bt_gatt_server_new(server->db, server->att, mtu);
 	if (!server->gatt) {
 		fprintf(stderr, "Failed to create GATT server\n");
 		goto fail;
 	}
 
+	server->hr_visible = hr_visible;
+
 	if (verbose) {
 		bt_att_set_debug(server->att, att_debug_cb, "att: ", NULL);
 		bt_gatt_server_set_debug(server->gatt, gatt_debug_cb,
-								 "server: ", NULL);
+							"server: ", NULL);
 	}
 
 	/* Random seed for generating fake Heart Rate measurements */
 	srand(time(NULL));
 
 	/* bt_gatt_server already holds a reference */
-	populate_gap_service(server);
-	populate_gatt_service(server);
-	populate_user_service(server);
+	populate_db(server);
 
 	return server;
 
 fail:
 	gatt_db_unref(server->db);
+	free(server->device_name);
 	bt_att_unref(server->att);
 	free(server);
 
@@ -676,16 +616,42 @@ fail:
 
 static void server_destroy(struct server *server)
 {
+	timeout_remove(server->hr_timeout_id);
 	bt_gatt_server_unref(server->gatt);
 	gatt_db_unref(server->db);
 }
 
+static void usage(void)
+{
+	printf("btgatt-server\n");
+	printf("Usage:\n\tbtgatt-server [options]\n");
 
+	printf("Options:\n"
+		"\t-i, --index <id>\t\tSpecify adapter index, e.g. hci0\n"
+		"\t-m, --mtu <mtu>\t\t\tThe ATT MTU to use\n"
+		"\t-s, --security-level <sec>\tSet security level (low|"
+								"medium|high)\n"
+		"\t-t, --type [random|public] \t The source address type\n"
+		"\t-v, --verbose\t\t\tEnable extra logging\n"
+		"\t-r, --heart-rate\t\tEnable Heart Rate service\n"
+		"\t-h, --help\t\t\tDisplay help\n");
+}
+
+static struct option main_options[] = {
+	{ "index",		1, 0, 'i' },
+	{ "mtu",		1, 0, 'm' },
+	{ "security-level",	1, 0, 's' },
+	{ "type",		1, 0, 't' },
+	{ "verbose",		0, 0, 'v' },
+	{ "heart-rate",		0, 0, 'r' },
+	{ "help",		0, 0, 'h' },
+	{ }
+};
 
 static int l2cap_le_att_listen_and_accept(bdaddr_t *src, int sec,
-		uint8_t src_type)
+							uint8_t src_type)
 {
-	int sk, nsk, i;
+	int sk, nsk;
 	struct sockaddr_l2 srcaddr, addr;
 	socklen_t optlen;
 	struct bt_security btsec;
@@ -703,7 +669,7 @@ static int l2cap_le_att_listen_and_accept(bdaddr_t *src, int sec,
 	srcaddr.l2_cid = htobs(ATT_CID);
 	srcaddr.l2_bdaddr_type = src_type;
 	bacpy(&srcaddr.l2_bdaddr, src);
-	PRLOG("\n");
+
 	if (bind(sk, (struct sockaddr *) &srcaddr, sizeof(srcaddr)) < 0) {
 		perror("Failed to bind L2CAP socket");
 		goto fail;
@@ -713,7 +679,7 @@ static int l2cap_le_att_listen_and_accept(bdaddr_t *src, int sec,
 	memset(&btsec, 0, sizeof(btsec));
 	btsec.level = sec;
 	if (setsockopt(sk, SOL_BLUETOOTH, BT_SECURITY, &btsec,
-				   sizeof(btsec)) != 0) {
+							sizeof(btsec)) != 0) {
 		fprintf(stderr, "Failed to set L2CAP security level\n");
 		goto fail;
 	}
@@ -723,7 +689,7 @@ static int l2cap_le_att_listen_and_accept(bdaddr_t *src, int sec,
 		goto fail;
 	}
 
-	PRLOG("Started listening on ATT channel. Waiting for connections\n");
+	printf("Started listening on ATT channel. Waiting for connections\n");
 
 	memset(&addr, 0, sizeof(addr));
 	optlen = sizeof(addr);
@@ -734,7 +700,7 @@ static int l2cap_le_att_listen_and_accept(bdaddr_t *src, int sec,
 	}
 
 	ba2str(&addr.l2_bdaddr, ba);
-	PRLOG("Connect from %s\n", ba);
+	printf("Connect from %s\n", ba);
 	close(sk);
 
 	return nsk;
@@ -744,6 +710,413 @@ fail:
 	return -1;
 }
 
+static void notify_usage(void)
+{
+	printf("Usage: notify [options] <value_handle> <value>\n"
+					"Options:\n"
+					"\t -i, --indicate\tSend indication\n"
+					"e.g.:\n"
+					"\tnotify 0x0001 00 01 00\n");
+}
+
+static struct option notify_options[] = {
+	{ "indicate",	0, 0, 'i' },
+	{ }
+};
+
+static bool parse_args(char *str, int expected_argc,  char **argv, int *argc)
+{
+	char **ap;
+
+	for (ap = argv; (*ap = strsep(&str, " \t")) != NULL;) {
+		if (**ap == '\0')
+			continue;
+
+		(*argc)++;
+		ap++;
+
+		if (*argc > expected_argc)
+			return false;
+	}
+
+	return true;
+}
+
+static void conf_cb(void *user_data)
+{
+	PRLOG("Received confirmation\n");
+}
+
+static void cmd_notify(struct server *server, char *cmd_str)
+{
+	int opt, i;
+	char *argvbuf[516];
+	char **argv = argvbuf;
+	int argc = 1;
+	uint16_t handle;
+	char *endptr = NULL;
+	int length;
+	uint8_t *value = NULL;
+	bool indicate = false;
+
+	if (!parse_args(cmd_str, 514, argv + 1, &argc)) {
+		printf("Too many arguments\n");
+		notify_usage();
+		return;
+	}
+
+	optind = 0;
+	argv[0] = "notify";
+	while ((opt = getopt_long(argc, argv, "+i", notify_options,
+								NULL)) != -1) {
+		switch (opt) {
+		case 'i':
+			indicate = true;
+			break;
+		default:
+			notify_usage();
+			return;
+		}
+	}
+
+	argc -= optind;
+	argv += optind;
+
+	if (argc < 1) {
+		notify_usage();
+		return;
+	}
+
+	handle = strtol(argv[0], &endptr, 16);
+	if (!endptr || *endptr != '\0' || !handle) {
+		printf("Invalid handle: %s\n", argv[0]);
+		return;
+	}
+
+	length = argc - 1;
+
+	if (length > 0) {
+		if (length > UINT16_MAX) {
+			printf("Value too long\n");
+			return;
+		}
+
+		value = malloc(length);
+		if (!value) {
+			printf("Failed to construct value\n");
+			return;
+		}
+
+		for (i = 1; i < argc; i++) {
+			if (strlen(argv[i]) != 2) {
+				printf("Invalid value byte: %s\n",
+								argv[i]);
+				goto done;
+			}
+
+			value[i-1] = strtol(argv[i], &endptr, 16);
+			if (endptr == argv[i] || *endptr != '\0'
+							|| errno == ERANGE) {
+				printf("Invalid value byte: %s\n",
+								argv[i]);
+				goto done;
+			}
+		}
+	}
+
+	if (indicate) {
+		if (!bt_gatt_server_send_indication(server->gatt, handle,
+							value, length,
+							conf_cb, NULL, NULL))
+			printf("Failed to initiate indication\n");
+	} else if (!bt_gatt_server_send_notification(server->gatt, handle,
+								value, length))
+		printf("Failed to initiate notification\n");
+
+done:
+	free(value);
+}
+
+static void heart_rate_usage(void)
+{
+	printf("Usage: heart-rate on|off\n");
+}
+
+static void cmd_heart_rate(struct server *server, char *cmd_str)
+{
+	bool enable;
+	uint8_t pdu[4];
+	struct gatt_db_attribute *attr;
+
+	if (!cmd_str) {
+		heart_rate_usage();
+		return;
+	}
+
+	if (strcmp(cmd_str, "on") == 0)
+		enable = true;
+	else if (strcmp(cmd_str, "off") == 0)
+		enable = false;
+	else {
+		heart_rate_usage();
+		return;
+	}
+
+	if (enable == server->hr_visible) {
+		printf("Heart Rate Service already %s\n",
+						enable ? "visible" : "hidden");
+		return;
+	}
+
+	server->hr_visible = enable;
+	attr = gatt_db_get_attribute(server->db, server->hr_handle);
+	gatt_db_service_set_active(attr, server->hr_visible);
+	update_hr_msrmt_simulation(server);
+
+	if (!server->svc_chngd_enabled)
+		return;
+
+	put_le16(server->hr_handle, pdu);
+	put_le16(server->hr_handle + 7, pdu + 2);
+
+	server->hr_msrmt_enabled = false;
+	update_hr_msrmt_simulation(server);
+
+	bt_gatt_server_send_indication(server->gatt,
+						server->gatt_svc_chngd_handle,
+						pdu, 4, conf_cb, NULL, NULL);
+}
+
+static void print_uuid(const bt_uuid_t *uuid)
+{
+	char uuid_str[MAX_LEN_UUID_STR];
+	bt_uuid_t uuid128;
+
+	bt_uuid_to_uuid128(uuid, &uuid128);
+	bt_uuid_to_string(&uuid128, uuid_str, sizeof(uuid_str));
+
+	printf("%s\n", uuid_str);
+}
+
+static void print_incl(struct gatt_db_attribute *attr, void *user_data)
+{
+	struct server *server = user_data;
+	uint16_t handle, start, end;
+	struct gatt_db_attribute *service;
+	bt_uuid_t uuid;
+
+	if (!gatt_db_attribute_get_incl_data(attr, &handle, &start, &end))
+		return;
+
+	service = gatt_db_get_attribute(server->db, start);
+	if (!service)
+		return;
+
+	gatt_db_attribute_get_service_uuid(service, &uuid);
+
+	printf("\t  " COLOR_GREEN "include" COLOR_OFF " - handle: "
+					"0x%04x, - start: 0x%04x, end: 0x%04x,"
+					"uuid: ", handle, start, end);
+	print_uuid(&uuid);
+}
+
+static void print_desc(struct gatt_db_attribute *attr, void *user_data)
+{
+	printf("\t\t  " COLOR_MAGENTA "descr" COLOR_OFF
+					" - handle: 0x%04x, uuid: ",
+					gatt_db_attribute_get_handle(attr));
+	print_uuid(gatt_db_attribute_get_type(attr));
+}
+
+static void print_chrc(struct gatt_db_attribute *attr, void *user_data)
+{
+	uint16_t handle, value_handle;
+	uint8_t properties;
+	uint16_t ext_prop;
+	bt_uuid_t uuid;
+
+	if (!gatt_db_attribute_get_char_data(attr, &handle,
+								&value_handle,
+								&properties,
+								&ext_prop,
+								&uuid))
+		return;
+
+	printf("\t  " COLOR_YELLOW "charac" COLOR_OFF
+				" - start: 0x%04x, value: 0x%04x, "
+				"props: 0x%02x, ext_prop: 0x%04x, uuid: ",
+				handle, value_handle, properties, ext_prop);
+	print_uuid(&uuid);
+
+	gatt_db_service_foreach_desc(attr, print_desc, NULL);
+}
+
+static void print_service(struct gatt_db_attribute *attr, void *user_data)
+{
+	struct server *server = user_data;
+	uint16_t start, end;
+	bool primary;
+	bt_uuid_t uuid;
+
+	if (!gatt_db_attribute_get_service_data(attr, &start, &end, &primary,
+									&uuid))
+		return;
+
+	printf(COLOR_RED "service" COLOR_OFF " - start: 0x%04x, "
+				"end: 0x%04x, type: %s, uuid: ",
+				start, end, primary ? "primary" : "secondary");
+	print_uuid(&uuid);
+
+	gatt_db_service_foreach_incl(attr, print_incl, server);
+	gatt_db_service_foreach_char(attr, print_chrc, NULL);
+
+	printf("\n");
+}
+
+static void cmd_services(struct server *server, char *cmd_str)
+{
+	gatt_db_foreach_service(server->db, NULL, print_service, server);
+}
+
+static bool convert_sign_key(char *optarg, uint8_t key[16])
+{
+	int i;
+
+	if (strlen(optarg) != 32) {
+		printf("sign-key length is invalid\n");
+		return false;
+	}
+
+	for (i = 0; i < 16; i++) {
+		if (sscanf(optarg + (i * 2), "%2hhx", &key[i]) != 1)
+			return false;
+	}
+
+	return true;
+}
+
+static void set_sign_key_usage(void)
+{
+	printf("Usage: set-sign-key [options]\nOptions:\n"
+		"\t -c, --sign-key <remote csrk>\tRemote CSRK\n"
+		"e.g.:\n"
+		"\tset-sign-key -c D8515948451FEA320DC05A2E88308188\n");
+}
+
+static bool remote_counter(uint32_t *sign_cnt, void *user_data)
+{
+	static uint32_t cnt = 0;
+
+	if (*sign_cnt < cnt)
+		return false;
+
+	cnt = *sign_cnt;
+
+	return true;
+}
+
+static void cmd_set_sign_key(struct server *server, char *cmd_str)
+{
+	char *argv[3];
+	int argc = 0;
+	uint8_t key[16];
+
+	memset(key, 0, 16);
+
+	if (!parse_args(cmd_str, 2, argv, &argc)) {
+		set_sign_key_usage();
+		return;
+	}
+
+	if (argc != 2) {
+		set_sign_key_usage();
+		return;
+	}
+
+	if (!strcmp(argv[0], "-c") || !strcmp(argv[0], "--sign-key")) {
+		if (convert_sign_key(argv[1], key))
+			bt_att_set_remote_key(server->att, key, remote_counter,
+									server);
+	} else
+		set_sign_key_usage();
+}
+
+static void cmd_help(struct server *server, char *cmd_str);
+
+typedef void (*command_func_t)(struct server *server, char *cmd_str);
+
+static struct {
+	char *cmd;
+	command_func_t func;
+	char *doc;
+} command[] = {
+	{ "help", cmd_help, "\tDisplay help message" },
+	{ "notify", cmd_notify, "\tSend handle-value notification" },
+	{ "heart-rate", cmd_heart_rate, "\tHide/Unhide Heart Rate Service" },
+	{ "services", cmd_services, "\tEnumerate all services" },
+	{ "set-sign-key", cmd_set_sign_key,
+			"\tSet remote signing key for signed write command"},
+	{ }
+};
+
+static void cmd_help(struct server *server, char *cmd_str)
+{
+	int i;
+
+	printf("Commands:\n");
+	for (i = 0; command[i].cmd; i++)
+		printf("\t%-15s\t%s\n", command[i].cmd, command[i].doc);
+}
+
+static void prompt_read_cb(int fd, uint32_t events, void *user_data)
+{
+	ssize_t read;
+	size_t len = 0;
+	char *line = NULL;
+	char *cmd = NULL, *args;
+	struct server *server = user_data;
+	int i;
+
+	if (events & (EPOLLRDHUP | EPOLLHUP | EPOLLERR)) {
+		mainloop_quit();
+		return;
+	}
+
+	read = getline(&line, &len, stdin);
+	if (read < 0)
+		return;
+
+	if (read <= 1) {
+		cmd_help(server, NULL);
+		print_prompt();
+		return;
+	}
+
+	line[read-1] = '\0';
+	args = line;
+
+	while ((cmd = strsep(&args, " \t")))
+		if (*cmd != '\0')
+			break;
+
+	if (!cmd)
+		goto failed;
+
+	for (i = 0; command[i].cmd; i++) {
+		if (strcmp(command[i].cmd, cmd) == 0)
+			break;
+	}
+
+	if (command[i].cmd)
+		command[i].func(server, args);
+	else
+		fprintf(stderr, "Unknown command: %s\n", line);
+
+failed:
+	print_prompt();
+
+	free(line);
+}
 
 static void signal_cb(int signum, void *user_data)
 {
@@ -757,273 +1130,101 @@ static void signal_cb(int signum, void *user_data)
 	}
 }
 
-static void send_cmd(int cmd, void *params, int params_len)
-{
-	struct hci_request rq;
-	uint8_t status;
-	int dd, ret, hdev;
-
-	if (hdev < 0)
-		hdev = hci_get_route(NULL);
-
-	dd = hci_open_dev(hdev);
-	if (dd < 0) {
-		perror("Could not open device");
-		exit(1);
-	}
-
-
-	memset(&rq, 0, sizeof(rq));
-	rq.ogf = OGF_LE_CTL;
-	rq.ocf = cmd;
-	rq.cparam = params;
-	rq.clen = params_len;
-	rq.rparam = &status;
-	rq.rlen = 1;
-
-	ret = hci_send_req(dd, &rq, 1000);
-
-done:
-	hci_close_dev(dd);
-
-	if (ret < 0) {
-		fprintf(stderr, "Can't send cmd 0x%x to hci%d: %s (%d)\n", cmd,
-				hdev, strerror(errno), errno);
-		exit(1);
-	}
-
-	if (status) {
-		fprintf(stderr,
-				"LE cmd 0x%x on hci%d returned status %d\n", cmd,
-				hdev, status);
-		exit(1);
-	}
-}
-
-
-static void clear_adv_set(void)
-{
-	int temp = 10;
-	send_cmd(BT_HCI_CMD_LE_CLEAR_ADV_SETS,  &temp, 1);
-}
-
-
-static void set_adv_data(void)
-{
-	struct bt_hci_cmd_le_set_adv_data param;
-#ifdef DUEROS
-	uint8_t data[] = {0x02, 0x1, 0x01, 0x03, 0x03, 0x11, 0x11, 0x0c, 0x09, 0x44, 0x75, 0x65, 0x72, 0x4f, 0x53, 0x5f, 0x34, 0x30, 0x38, 0x32};
-#else
-	//complete local name: 0x04, 0x09, 0x41, 0x4d, 0x4c (AML)
-	uint8_t data[] = {0x02, 0x1, 0x06, 0x03, 0x03, 0x0a, 0x18, 0x04, 0x09, 0x41, 0x4d, 0x4c, 0x08, 0x1b, 0x0, 0x0, 0x0, 0x0, 0x0, 0x0, 0x0};
-	// advertise public mac addr
-
-	memcpy(data + sizeof(data) - 6, hdi.bdaddr.b, 6);
-#endif
-
-	memset(&param, 0, sizeof(param));
-	param.len = sizeof(data);
-	memcpy(param.data, data , param.len);
-
-	send_cmd(BT_HCI_CMD_LE_SET_ADV_DATA, (void *)&param, sizeof(param));
-
-
-}
-
-
-static void set_adv_response(void)
-{
-	struct bt_hci_cmd_le_set_scan_rsp_data param;
-
-	//clear response
-	memset(&param, 0, sizeof(param));
-	send_cmd(BT_HCI_CMD_LE_SET_SCAN_RSP_DATA, (void *)&param, sizeof(param));
-
-
-}
-
-
-static void set_adv_parameters(void)
-{
-	struct bt_hci_cmd_le_set_adv_parameters param;
-
-#if 1
-	struct bt_hci_cmd_le_set_random_address r_bddr;
-
-	memcpy(r_bddr.addr, hdi.bdaddr.b, 6);
-	r_bddr.addr[0] += 0x04;
-	r_bddr.addr[1] += 0x04;
-
-	send_cmd(BT_HCI_CMD_LE_SET_RANDOM_ADDRESS, (void *)&r_bddr, sizeof(r_bddr));
-#endif
-	param.min_interval = cpu_to_le16(0x0020);
-	param.max_interval = cpu_to_le16(0x0020);
-	param.type = 0x00;		/* connectable no-direct advertising */
-	param.own_addr_type = 0x01;	/* Use random address */
-	//param.own_addr_type = 0x00;	/* Use public address */
-	param.direct_addr_type = 0x00;
-	memset(param.direct_addr, 0, 6);
-	param.channel_map = 0x07;
-	param.filter_policy = 0x00;
-
-
-	send_cmd(BT_HCI_CMD_LE_SET_ADV_PARAMETERS, (void *)&param, sizeof(param));
-
-}
-
-static void set_adv_enable(int enable)
-{
-	struct bt_hci_cmd_le_set_adv_enable param;
-	if (enable != 0 && enable != 1) {
-		PRLOG("%s: invalid arg: \n", __func__, enable);
-		return;
-	}
-	param.enable = enable;
-	send_cmd(BT_HCI_CMD_LE_SET_ADV_ENABLE, (void *)&param, sizeof(param));
-
-
-}
-
-void ble_init(void)
-{
-	set_adv_enable(0);
-	set_adv_data();
-	set_adv_parameters();
-	set_adv_response();
-	set_adv_enable(1);
-}
-
-
-
-void hci_dev_init(void)
-{
-
-	/* Open HCI socket	*/
-	if ((ctl = socket(AF_BLUETOOTH, SOCK_RAW, BTPROTO_HCI)) < 0) {
-		perror("Can't open HCI socket.");
-		exit(1);
-	}
-
-	hdi.dev_id = 0;
-
-	if (ioctl(ctl, HCIGETDEVINFO, (void *) &hdi)) {
-		perror("Can't get device info");
-		exit(1);
-	}
-
-}
-
-
-static void *check_wifi_status(void *user_data)
-{
-	bool result;
-	uint8_t status = 0;
-	FILE *fd;
-	int ret;
-#ifdef DUEROS
-	int i;
-	struct server *rtk_ble_server;
-	char socket_recv_bf[256] = {0};
-	rtk_ble_server = (struct server *)user_data;
-#endif
-	while (1) {
-#ifdef DUEROS
-		rtk_socket_rev_len = recv(rtk_ble_sk, socket_rev, 256, 0);
-		strncpy(socket_recv_bf, socket_rev, rtk_socket_rev_len);
-		PRLOG ("msg from duerOS: %s, len = %d\n", socket_rev, rtk_socket_rev_len);
-		if (rtk_socket_rev_len > 0) {
-			if (rtk_socket_rev_len > 20) {
-				for (i = 0 ; i < rtk_socket_rev_len / 20 ; i++ )
-					bt_gatt_server_send_notification(rtk_ble_server->gatt, rtk_ble_server->chara_handle, socket_rev + i * 20, 20);
-				if (rtk_socket_rev_len % 20)
-					bt_gatt_server_send_notification(rtk_ble_server->gatt, rtk_ble_server->chara_handle, socket_rev + 20 * i, rtk_socket_rev_len - 20 * i);
-			} else
-				bt_gatt_server_send_notification(rtk_ble_server->gatt, rtk_ble_server->chara_handle, socket_rev, rtk_socket_rev_len);
-		}
-		memset(socket_recv_bf, 0, sizeof(socket_recv_bf));
-#else
-
-		if (wifi_configured) {
-			PRLOG("wifi configured\n");
-			system("sh /etc/bsa/config/wifi_tool.sh");
-			fd = fopen(wifi_status_file, "r+");
-			if (fd <= 0) {
-				PRLOG("read wifi status file error\n");
-			}
-			ret = fread(&status, 1, 1, fd);
-			if (ret == 1) {
-				if (!strncmp(&status, &wifi_success, 1)) {
-					wifi_status = 1;
-					PRLOG("wifi setup success, and then exit ble mode\n");
-					sleep(5);
-					system("sh /usr/bin/bluez_tool.sh reset &");
-					exit(0);
-				} else {
-					wifi_status = 2;
-					PRLOG("status not ok: %c , configure wifi fail!\n", status);
-				}
-			}
-			fclose(fd);
-
-			status = 0;
-			wifi_configured = 0;
-		}
-		sleep(2);
-#endif
-	}
-
-	PRLOG("%s thread exit\n", __func__);
-}
-
-
-
-
 int main(int argc, char *argv[])
 {
-
+	int opt;
 	bdaddr_t src_addr;
-	int fd, bytes;
+	int dev_id = -1;
+	int fd;
 	int sec = BT_SECURITY_LOW;
-	char msg[64];
 	uint8_t src_type = BDADDR_LE_PUBLIC;
+	uint16_t mtu = 0;
 	sigset_t mask;
+	bool hr_visible = false;
+	struct server *server;
 
-	if (argc > 1) {
-		if (strcmp(argv[1], "-v") == 0)
+	while ((opt = getopt_long(argc, argv, "+hvrs:t:m:i:",
+						main_options, NULL)) != -1) {
+		switch (opt) {
+		case 'h':
+			usage();
+			return EXIT_SUCCESS;
+		case 'v':
 			verbose = true;
-	}
-#ifdef DUEROS
-	//create socket server
-	memcpy(sk_handle.sock_path, socket_path, strlen(socket_path));
-	setup_socket_server(&sk_handle);
-	while (1) {
-begin:
-		rtk_ble_sk = accpet_client(&sk_handle);
-		if (rtk_ble_sk < 0) {
-			PRLOG("accept client fail\n");
-			sleep(1);
-			continue;
-		}
-		PRLOG ("accept done : %d\n", rtk_ble_sk);
-		memset(msg, 0, sizeof(msg));
-		bytes = recv(rtk_ble_sk, msg, sizeof(msg), 0);
-		if (bytes == 0 ) {
-			PRLOG("client leaved, waiting for reconnect");
-			goto begin;
-		}
-		PRLOG("bytes = %d, msg: %s\n", bytes, msg);
+			break;
+		case 'r':
+			hr_visible = true;
+			break;
+		case 's':
+			if (strcmp(optarg, "low") == 0)
+				sec = BT_SECURITY_LOW;
+			else if (strcmp(optarg, "medium") == 0)
+				sec = BT_SECURITY_MEDIUM;
+			else if (strcmp(optarg, "high") == 0)
+				sec = BT_SECURITY_HIGH;
+			else {
+				fprintf(stderr, "Invalid security level\n");
+				return EXIT_FAILURE;
+			}
+			break;
+		case 't':
+			if (strcmp(optarg, "random") == 0)
+				src_type = BDADDR_LE_RANDOM;
+			else if (strcmp(optarg, "public") == 0)
+				src_type = BDADDR_LE_PUBLIC;
+			else {
+				fprintf(stderr,
+					"Allowed types: random, public\n");
+				return EXIT_FAILURE;
+			}
+			break;
+		case 'm': {
+			int arg;
 
-		if (strncmp(msg, "aml_ble_setup_wifi", 18) == 0) {
-			PRLOG("aml_ble_setup_wifi connected\n");
+			arg = atoi(optarg);
+			if (arg <= 0) {
+				fprintf(stderr, "Invalid MTU: %d\n", arg);
+				return EXIT_FAILURE;
+			}
+
+			if (arg > UINT16_MAX) {
+				fprintf(stderr, "MTU too large: %d\n", arg);
+				return EXIT_FAILURE;
+			}
+
+			mtu = (uint16_t) arg;
 			break;
 		}
+		case 'i':
+			dev_id = hci_devid(optarg);
+			if (dev_id < 0) {
+				perror("Invalid adapter");
+				return EXIT_FAILURE;
+			}
+
+			break;
+		default:
+			fprintf(stderr, "Invalid option: %c\n", opt);
+			return EXIT_FAILURE;
+		}
 	}
-#endif
-	hci_dev_init();
 
-	ble_init();
+	argc -= optind;
+	argv -= optind;
+	optind = 0;
 
-	bacpy(&src_addr, BDADDR_ANY);
+	if (argc) {
+		usage();
+		return EXIT_SUCCESS;
+	}
+
+	if (dev_id == -1)
+		bacpy(&src_addr, BDADDR_ANY);
+	else if (hci_devba(dev_id, &src_addr) < 0) {
+		perror("Adapter not available");
+		return EXIT_FAILURE;
+	}
+
 	fd = l2cap_le_att_listen_and_accept(&src_addr, sec, src_type);
 	if (fd < 0) {
 		fprintf(stderr, "Failed to accept L2CAP ATT connection\n");
@@ -1032,16 +1233,22 @@ begin:
 
 	mainloop_init();
 
-	server = server_create(fd);
+	server = server_create(fd, mtu, hr_visible);
 	if (!server) {
 		close(fd);
 		return EXIT_FAILURE;
 	}
 
+	if (mainloop_add_fd(fileno(stdin),
+				EPOLLIN | EPOLLRDHUP | EPOLLHUP | EPOLLERR,
+				prompt_read_cb, server, NULL) < 0) {
+		fprintf(stderr, "Failed to initialize console\n");
+		server_destroy(server);
 
-	pthread_create(&thread_id, NULL, check_wifi_status, server);
+		return EXIT_FAILURE;
+	}
 
-	PRLOG("Running GATT server\n");
+	printf("Running GATT server\n");
 
 	sigemptyset(&mask);
 	sigaddset(&mask, SIGINT);
@@ -1049,12 +1256,13 @@ begin:
 
 	mainloop_set_signal(&mask, signal_cb, NULL, NULL);
 
+	print_prompt();
+
 	mainloop_run();
 
-	PRLOG("Shutting down...\n");
+	printf("\n\nShutting down...\n");
 
 	server_destroy(server);
-	pthread_cancel(thread_id);
 
 	return EXIT_SUCCESS;
 }
