@@ -180,20 +180,20 @@ if TOOLS
 bin_PROGRAMS += tools/rctest tools/l2test tools/l2ping tools/bccmd \
 			tools/bluemoon tools/hex2hcd tools/mpris-proxy \
 			tools/btattach tools/btgatt-client tools/btgatt-server \
-			tools/advtest
+			tools/advtest tools/gatt-service tools/btiotest
 
 noinst_PROGRAMS += tools/bdaddr tools/avinfo tools/avtest \
 			tools/scotest tools/amptest tools/hwdb \
 			tools/hcieventmask tools/hcisecfilter \
 			tools/btinfo tools/btconfig \
 			tools/btsnoop tools/btproxy \
-			tools/btiotest tools/bneptest tools/mcaptest \
+			tools/bneptest tools/mcaptest \
 			tools/cltest tools/oobtest  \
 			tools/seq2bseq tools/nokfw tools/rtlfw \
 			tools/create-image \
 			tools/eddystone tools/ibeacon \
 			tools/test-runner tools/check-selftest \
-			tools/gatt-service profiles/iap/iapd
+			profiles/iap/iapd
 
 tools_bdaddr_SOURCES = tools/bdaddr.c src/oui.h src/oui.c
 tools_bdaddr_LDADD = lib/libbluetooth-internal.la @UDEV_LIBS@
