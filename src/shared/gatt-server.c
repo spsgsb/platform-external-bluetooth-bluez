@@ -427,9 +427,13 @@ static void process_read_by_type(struct async_read_op *op)
 		return;
 	}
 
+	/*
 	ecode = check_permissions(server, attr, BT_ATT_PERM_READ |
 						BT_ATT_PERM_READ_AUTHEN |
 						BT_ATT_PERM_READ_ENCRYPT);
+	*/
+	ecode = check_permissions(server, attr, BT_ATT_PERM_READ_MASK);
+
 	if (ecode)
 		goto error;
 
@@ -782,9 +786,12 @@ static void write_cb(uint8_t opcode, const void *pdu,
 				(opcode == BT_ATT_OP_WRITE_REQ) ? "Req" : "Cmd",
 				handle);
 
+	/*
 	ecode = check_permissions(server, attr, BT_ATT_PERM_WRITE |
 						BT_ATT_PERM_WRITE_AUTHEN |
 						BT_ATT_PERM_WRITE_ENCRYPT);
+	*/
+	ecode = check_permissions(server, attr, BT_ATT_PERM_WRITE_MASK);
 	if (ecode)
 		goto error;
 
@@ -888,9 +895,12 @@ static void handle_read_req(struct bt_gatt_server *server, uint8_t opcode,
 			opcode == BT_ATT_OP_READ_BLOB_REQ ? "Blob " : "",
 			handle);
 
+	/*
 	ecode = check_permissions(server, attr, BT_ATT_PERM_READ |
 						BT_ATT_PERM_READ_AUTHEN |
 						BT_ATT_PERM_READ_ENCRYPT);
+	*/
+	ecode = check_permissions(server, attr, BT_ATT_PERM_READ_MASK);
 	if (ecode)
 		goto error;
 
@@ -987,9 +997,13 @@ static void read_multiple_complete_cb(struct gatt_db_attribute *attr, int err,
 		return;
 	}
 
+	/*
 	ecode = check_permissions(data->server, attr, BT_ATT_PERM_READ |
 						BT_ATT_PERM_READ_AUTHEN |
 						BT_ATT_PERM_READ_ENCRYPT);
+	*/
+	ecode = check_permissions(data->server, next_attr,
+				  BT_ATT_PERM_READ_MASK);
 	if (ecode) {
 		bt_att_send_error_rsp(data->server->att,
 					BT_ATT_OP_READ_MULT_REQ, handle, ecode);
@@ -1082,6 +1096,10 @@ static void read_multiple_cb(uint8_t opcode, const void *pdu,
 		ecode = BT_ATT_ERROR_INVALID_HANDLE;
 		goto error;
 	}
+
+	ecode = check_permissions(data->server, attr, BT_ATT_PERM_READ_MASK);
+	if (ecode)
+	        goto error;
 
 	if (gatt_db_attribute_read(attr, 0, opcode, server->att,
 					read_multiple_complete_cb, &data))
@@ -1221,6 +1239,10 @@ static void prep_write_cb(uint8_t opcode, const void *pdu,
 		ecode = BT_ATT_ERROR_INSUFFICIENT_RESOURCES;
 		goto error;
 	}
+
+	ecode = check_permissions(server, attr, BT_ATT_PERM_WRITE_MASK);
+	if (ecode)
+	        goto error;
 
 	bt_att_send(server->att, BT_ATT_OP_PREP_WRITE_RSP, pdu, length, NULL,
 								NULL, NULL);
