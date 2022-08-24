@@ -1097,7 +1097,7 @@ static void read_multiple_cb(uint8_t opcode, const void *pdu,
 		goto error;
 	}
 
-	ecode = check_permissions(data->server, attr, BT_ATT_PERM_READ_MASK);
+	ecode = check_permissions(data.server, attr, BT_ATT_PERM_READ_MASK);
 	if (ecode)
 	        goto error;
 
